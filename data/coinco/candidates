@@ -2437,6 +2437,7 @@ flow.V::encircle;run;stream;spew;gush;move;curve;emanate;stay;course;usher;pour;
 winter.N::year end;mid year;frost;December;season;wintertime;year;cold season;snowfall;freeze;cold month;wintertide;winter season;cold;holiday;Christmas;chill
 decay.J::run down;old;dilapidate;erode;raggedy;age;destroy;decompose;diminish;wear out;rot;inferior;deteriorate
 nationwide.J::worldwide;extensive;statewide;across the nation;political;nationally;general;globally;coast to coast;in the USA;countrywide;widespread;national
+facade.N::surface architecture;makeup;face;outside;design;exterior;front;structure
 lining.N::trim;insert;finish;outline;covering;fringe;liner;padding;cloth;border;fabric
 thing.N::affair;concept;phenomenon;sentence;being;encounter;storey;entity;shape;aspect;feat;indicator;the team;character;crime;handiwork;factor;teaching;their end;merchant;sound;evening;the issue;commodity;gadget;bit;condition;undertaking;piece;item;stuff;truth;activity;conclusion;accomplishment;occurrence;creation;idea;competition;individual;sport;obsession;event;concern;proceeding;apparatus;nightmare;trinket;everything;experience;issue;body;be;perception;monster;business;circumstance;rock;possibility;incident;contrivance;article;stone;substance;anything;denominator;act;utterance;musing;point;image;scene;whatever;peculiarity;struggle;gimmick;quality;confidence;area;secret;memory;critter;leech;possession;life;option;form;trait;detail;part;virtue;case;word;extension;glory;this;characteristic;work;soul;matter;interaction;appendage;situation;outcome;sculpture;procedure;the affair;figure;emanation;attribute;it;topic;something;deed;gear;relationship;feature;going on;instance;inch;subject;creature;object;the job;moment;statue;belongings;structure;task;happening;scenario;element;thought;person;construction;time;occasion;atrocity;dream;fact;marvel
 slight.J::little;light;bit of;faint;weak;meager;tiny;scant;gentle;mild;minor;low level;small;subtle;minute
@@ -2836,7 +2837,7 @@ trouble.N::affair;harm;dilemma;distress;danger;hassle;plight;crisis;worry;misfor
 leadership.N::executive;management;official;administration;executive branch;heading;director;command;authority;directorship;leader
 mutter.J::grunt;muster;whisper;stutter;mention;say;fumble;utter;voice;mumble
 aim.V::intend;target;point;slant;focus;direct;intent;design;gear
-cent.N::pence;percentage;penny;cent unit;dollar fraction
+cent.N::¢;penny;dollar fraction;pence;percentage;cent unit
 suppose.V::figure;see;expect;wonder;guess;grant;dare say;suspect;surmise;warrant;infer;conjecture;intend;reckon;understand;presume;imagine;believe;assume;gather;say;admit;allow;think;mean
 agency.N::firm;program;group;service;business;division;company;work;entity;non profit group;source;station;bureau;sponsor;assistance;department;organization;activity;organisation;outlet;tent
 landmark.N::symbol;monument;prominent place;attraction;sight;milestone;marker
@@ -3146,7 +3147,6 @@ cyclical.J::seasonal;reccur;recurrent;exponential;repetitious;intermittent;repet
 memory.N::ram;datum;nostalgia;past;recollection;hard drive;remembrance;flashback;disk;event;ability to remember;life story;system;dairy;memory;memoir;data bank;rememberance;data base;remember;database;recall;remember thing;harddrive;reminiscence;thought;history
 authority.N::control;right;force;jurisdiction;influence;law enforcement;supremacy;guard;authorized official;superior;management;police;entitlement;chain of command;prerogative;administration;police officer;privilege;responsibility;leader;authorization;dominion;enforcement;ability;power;permission;government;legality;polizia;lead;license;investigator;official;rule;dominance;ruling class;command;officer;authorisation
 immortal.N::neverending;undead;forever;divine;constant;eternal;undying;timeless;imperishable;everlasting;lasting
-<UNK>.N::surface architecture;makeup;face;outside;design;exterior;front;structure
 animal.N::beast;creator;pet;carcass;rodent;pest;mammal;critter;creature
 potential.J::possible
 apologize.V::express regret;pardon;regret;repent
