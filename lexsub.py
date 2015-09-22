@@ -44,7 +44,7 @@ def rewrite_pos(string):
         return word + '/RB'
     else:
         # ideally should return an exception...
-        print string, "->", word + '/UK'
+        raise ValueError("Don't know how to handle a POS tag of '%s' % pos")
         return word + '/UK'
 
 def scrub_substitutes(before, target):
@@ -58,11 +58,17 @@ def scrub_substitutes(before, target):
     This dictionary will (probably) be smaller than the input dictionary.
     """
     targetpos = target[-3:]
+    #targetpos = ""
     before_iter = before.iteritems()
     remove_mwe = ((k, v) for k, v in before_iter if ' ' not in k)
     remove_dash = ((k, v) for k, v in remove_mwe if '-' not in k)
     add_pos = ((k + targetpos, v) for k, v in remove_mwe)
     return dict(add_pos)
+
+def scrub_candidates(before, target):
+    fakesubs = {k: 1 for k in before}
+    return scrub_substitutes(fakesubs, target).keys()
+
 
 
 class LexsubData(object):
@@ -108,8 +114,7 @@ class LexsubData(object):
                 if ident not in targets:
                     continue
                 if targets[ident] != target:
-                    print "found %s, expected %s" % (target, targets[ident])
-                    raise ValueError("Something didn't line up")
+                    raise ValueError("Something didn't line up: found %s, expected %s" % (target, targets[ident]))
                 sentences[sentence].append(ident)
                 starts[ident] = find_start(sentence, index)
 
@@ -130,11 +135,17 @@ class LexsubData(object):
                     raise IndexError("These are not the words you are looking for.")
 
 
-        # generate candidates
-        candidates = defaultdict(set)
-        for ident, subs in golds.iteritems():
-            candidates[targets[ident]].update(subs.keys())
-        print len(candidates)
+        ## generate candidates
+        #candidates = defaultdict(set)
+        #for ident, subs in golds.iteritems():
+        #    candidates[targets[ident]].update(subs.keys())
+        candidates = {}
+        with open(os.path.join(foldername, "candidates")) as f:
+            for line in f:
+                line = line.strip()
+                left, right = line.split("::")
+                target = rewrite_pos(left)
+                candidates[target] = scrub_candidates(right.split(";"), target)
 
         idents = targets.keys()
         self.tokens = [tokens[k] for k in idents]
@@ -217,6 +228,17 @@ def compute_oren(space, targets, depmat, candidates):
     pred_scores = np.einsum('ij,ikj->ik', predvecs, candvecs)
     return pred_scores
 
+def compute_ooc(space, targets, candidates):
+    normspace = space.normalize()
+    targetvecs = normspace.matrix[targets]
+    candvecs = normspace.matrix[candidates]
+    pred_scores = np.einsum('ij,ikj->ik', targetvecs, candvecs)
+    return pred_scores
+
+def compute_random(candidates):
+    return np.random.rand(*candidates.shape)
+
+
 #def gap(pred_scores, true_scores):
 #    maxcands = pred_scores.shape[1]
 #    maxi = np.sum(true_scores > 0, axis=1) - 1
@@ -269,14 +291,17 @@ def main():
     args = parser.parse_args()
 
     # load the data
-    semeval = LexsubData("data/semeval_trial")
+    semeval = LexsubData("data/semeval_all")
     # load the space
     space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/output/dependency.svd300.ppmi.250k.1m.npz")
+    #space = utdeftvs.load_mikolov_text("/scratch/cluster/roller/spaces/levy/lexsub_word_embeddings")
     # need to map our vocabulary to their indices
     targets, candidates, scores = semeval.generate_matrices(space.lookup)
     depmat = dependencies_to_indices(semeval.tokens, semeval.parses, space.clookup)
 
-    pred_scores = compute_oren(space, targets, depmat, candidates)
+    #pred_scores = compute_oren(space, targets, depmat, candidates)
+    pred_scores = compute_ooc(space, targets, candidates)
+    #pred_scores = compute_random(candidates)
     assert scores.shape == pred_scores.shape
 
     #pred_scores = pred_scores[2:3,:]
@@ -298,6 +323,8 @@ def main():
 
     #mygap = gap(pred_scores, scores)
     #print mygap
+    gaps = gaps[~np.isnan(gaps)]
+    print gaps
     print np.mean(gaps)
     #print np.mean(mygap)
 
