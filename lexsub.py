@@ -10,6 +10,8 @@ from sklearn.preprocessing import normalize
 import depextract
 import utdeftvs
 
+USE_LEMMAPOS = False
+
 def splitpop(string, delimeter):
     """
     Splits a string along a delimiter, and returns the
@@ -29,6 +31,11 @@ def find_start(string, index):
     return len(" ".join(before)) + 1
 
 def rewrite_pos(string):
+    # stupid data exceptions :(
+    if string == '.':
+        return string
+    elif string == '..N':
+        return '.'
     word, pos = splitpop(string, ".")
     if '.' in word:
         word, pos = splitpop(word, ".")
@@ -43,9 +50,7 @@ def rewrite_pos(string):
     elif pos == 'r':
         return word + '/RB'
     else:
-        # ideally should return an exception...
-        raise ValueError("Don't know how to handle a POS tag of '%s' % pos")
-        return word + '/UK'
+        raise ValueError("Don't know how to handle a POS tag of '%s' in '%s'" % (pos, string))
 
 def scrub_substitutes(before, target):
     """
@@ -57,8 +62,7 @@ def scrub_substitutes(before, target):
 
     This dictionary will (probably) be smaller than the input dictionary.
     """
-    targetpos = target[-3:]
-    #targetpos = ""
+    targetpos = USE_LEMMAPOS and target[-3:] or ""
     before_iter = before.iteritems()
     remove_mwe = ((k, v) for k, v in before_iter if ' ' not in k)
     remove_dash = ((k, v) for k, v in remove_mwe if '-' not in k)
@@ -121,7 +125,7 @@ class LexsubData(object):
         # parse the sentences
         plaintexts = sentences.keys()
         parsed_sentences = depextract.preprocess_with_corenlp(os.path.join(foldername, "parses"), plaintexts)
-        parsed_sentences = depextract.parse_corenlp_xml(parsed_sentences)
+        parsed_sentences = depextract.parse_corenlp_xml(parsed_sentences, dependencytype='basic-dependencies')
         parses = {}
         for sentence, parse in izip(sentences.iterkeys(), parsed_sentences):
             idents = sentences[sentence]
@@ -156,6 +160,7 @@ class LexsubData(object):
         for ident, subs in golds.iteritems():
             for c in candidates[targets[ident]]:
                 self.golds[ident][c] = subs.get(c, 0)
+        self.golds = [self.golds[k] for k in idents]
 
         assert len(self.targets) == len(self.parses) == len(self.golds)
 
@@ -163,7 +168,7 @@ class LexsubData(object):
     def generate_matrices(self, vocablookup):
         targets = np.zeros(len(self.targets), dtype=np.int32)
         numtargets = len(self.targets)
-        maxcands = max(len(g) for g in self.golds.itervalues())
+        maxcands = max(len(g) for g in self.golds)
 
         # the sister matrices
         subs = np.zeros((numtargets, maxcands), dtype=np.int32)
@@ -173,8 +178,8 @@ class LexsubData(object):
         # each column will have the ID of the substitute and the corresponding
         # number of substitutions in its sister matrix
         # but we want them to be ordered so the ID with the most subs is first
-        for i, (token, gold) in enumerate(izip(self.tokens, self.golds.itervalues())):
-            target = token.lemma_pos
+        for i, (token, gold) in enumerate(izip(self.tokens, self.golds)):
+            target = token.word_normed #USE_LEMMAPOS and token.lemma_pos or token.word_normed
             idx = vocablookup.get(target, 0)
             targets[i] = idx
             # we want items not in our vocab to have a 0 weight
@@ -196,14 +201,24 @@ class LexsubData(object):
 
         return targets, subs, scores
 
-def dependencies_to_indices(target_tokens, parses, lookup):
+def dependencies_to_indices(target_tokens, parses, lookup,space):
     deps = []
     for target, parse in izip(target_tokens, parses):
         deps.append([])
-        for relation, attachment, in depextract.extract_relations_for_token(parse, target):
-            dep = relation + "+" + attachment.lemma_pos
+        if USE_LEMMAPOS:
+            extractor = depextract.extract_relations_for_token(parse, target)
+        else:
+            extractor = depextract.extract_relations_for_token_melamud(parse, target, inverter='I')
+        for relation, attachment, in extractor:
+            if USE_LEMMAPOS:
+                dep = relation + "+" + attachment.lemma_pos
+            else:
+                dep = relation + "_" + attachment.word_normed
             if dep in lookup:
                 deps[-1].append(lookup[dep])
+            else:
+                if attachment.word_normed in space.lookup:
+                    print '-', dep
 
     numrows = len(deps)
     numcols = max(len(d) for d in deps)
@@ -219,17 +234,36 @@ def dependencies_to_indices(target_tokens, parses, lookup):
 def compute_oren(space, targets, depmat, candidates):
     normspace = space.normalize()
 
-    targetvecs = normspace.matrix[targets]
-    depvecs = normspace.cmatrix[depmat]
-    n = (depmat > 0).sum(axis=1) + 1
-    predvecs = normalize((targetvecs + depvecs.sum(axis=1)) / n[:,np.newaxis])
-    candvecs = normspace.matrix[candidates]
+    targetvecs = normspace.matrix[targets] # (2003, 600)
+    depvecs = normspace.cmatrix[depmat] # (2003, 14, 600)
+    n = (depmat > 0).sum(axis=1) + 1 # (2003,)
+    candvecs = normspace.matrix[candidates] # (2003, 38, 600)
 
-    pred_scores = np.einsum('ij,ikj->ik', predvecs, candvecs)
+    left = np.einsum('ij,ikj->ik', targetvecs, candvecs)
+    right = np.einsum('ijk,ilk->il', depvecs, candvecs)
+    pred_scores = (left + right) / n[:,np.newaxis]
+
     return pred_scores
+
+def compute_fakeoren(space, targets, depmat, candidates):
+    normspace = space.normalize()
+    targetvecs = normspace.matrix[targets]
+    candvecs = normspace.matrix[candidates]
+    depvecs = normspace.cmatrix[depmat].sum(axis=1)
+
+    # dist = || (a - p) - ((a - p)^Tn)n ||
+    n = normalize(depvecs - targetvecs, axis=1, norm='l2') # (1972, 300)
+    a_p = targetvecs[:,np.newaxis,:] - candvecs # (1972, 38, 300)
+    a_pTn = np.einsum('ijk,ik->ij', a_p, n) # (1972, 38)
+    a_pTnn = np.multiply(a_pTn[:,:,np.newaxis], n[:,np.newaxis,:]) # (1972, 38, 300)
+
+    dists = np.sqrt(np.sum(np.square(a_p - a_pTnn), axis=2))
+    return -dists
+
 
 def compute_ooc(space, targets, candidates):
     normspace = space.normalize()
+    #normspace = space
     targetvecs = normspace.matrix[targets]
     candvecs = normspace.matrix[candidates]
     pred_scores = np.einsum('ij,ikj->ik', targetvecs, candvecs)
@@ -237,6 +271,14 @@ def compute_ooc(space, targets, candidates):
 
 def compute_random(candidates):
     return np.random.rand(*candidates.shape)
+
+def compute_oracle(candidates, scores, space):
+    normspace = space.normalize()
+    perfect = np.multiply(space.matrix[candidates], scores[:,:,np.newaxis]).sum(axis=1)
+    perfect = normalize(perfect, axis=1, norm='l2')
+    pred_scores = np.einsum('ij,ikj->ik', perfect, normspace.matrix[candidates])
+    return pred_scores
+
 
 
 #def gap(pred_scores, true_scores):
@@ -291,17 +333,22 @@ def main():
     args = parser.parse_args()
 
     # load the data
-    semeval = LexsubData("data/semeval_all")
+    #semeval = LexsubData("data/semeval_all")
+    semeval = LexsubData("data/coinco")
     # load the space
-    space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/output/dependency.svd300.ppmi.250k.1m.npz")
-    #space = utdeftvs.load_mikolov_text("/scratch/cluster/roller/spaces/levy/lexsub_word_embeddings")
+    #space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/output/dependency.svd300.ppmi.250k.1m.npz", True)
+    #space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/dependency/output/dependency.w2v500.top250k.top1m.npz", True)
+    space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/levy/lexsub_embeddings.npz", True)
     # need to map our vocabulary to their indices
     targets, candidates, scores = semeval.generate_matrices(space.lookup)
-    depmat = dependencies_to_indices(semeval.tokens, semeval.parses, space.clookup)
+    depmat = dependencies_to_indices(semeval.tokens, semeval.parses, space.clookup, space)
+    print depmat
 
+    #pred_scores = compute_fakeoren(space, targets, depmat, candidates)
     #pred_scores = compute_oren(space, targets, depmat, candidates)
     pred_scores = compute_ooc(space, targets, candidates)
     #pred_scores = compute_random(candidates)
+    #pred_scores = compute_oracle(candidates, scores, space)
     assert scores.shape == pred_scores.shape
 
     #pred_scores = pred_scores[2:3,:]
