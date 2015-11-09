@@ -9,6 +9,7 @@ from sklearn.preprocessing import normalize
 
 import depextract
 import utdeftvs
+import ctxpredict.models
 
 USE_LEMMAPOS = False
 
@@ -97,7 +98,7 @@ class LexsubData(object):
                 target, ident = splitpop(left, " ")
                 target = rewrite_pos(target)
                 ident = int(ident)
-                rights = [r for r in right.split(";") if r]
+                rights = [r.strip() for r in right.split(";") if r.strip()]
                 # gold_golds is what the data explicitly says are the gold substitutes
                 # but these are not lemmatized or POS tagged, and contain MWE. We
                 # need to clean them up with scrub_substitutes
@@ -218,7 +219,8 @@ def dependencies_to_indices(target_tokens, parses, lookup,space):
                 deps[-1].append(lookup[dep])
             else:
                 if attachment.word_normed in space.lookup:
-                    print '-', dep
+                    #print '-', dep
+                    pass
 
     numrows = len(deps)
     numcols = max(len(d) for d in deps)
@@ -229,6 +231,50 @@ def dependencies_to_indices(target_tokens, parses, lookup,space):
         depmat[i,:l] = d
 
     return depmat
+
+def dependencies_to_indicies3(target_tokens, parses, vlookup, rlookup):
+    deps = []
+    rels = []
+    for target, parse in izip(target_tokens, parses):
+        d = np.zeros(10)
+        r = np.zeros(10)
+        i = 0
+        relattachments = list(depextract.extract_relations_for_token_melamud(parse, target, inverter='I'))
+        for relation, attachment in relattachments:
+            if i >= 10:
+                break
+            if relation not in rlookup or attachment.word_normed not in vlookup:
+                continue
+            rid = rlookup[relation] + 1
+            vid = vlookup[attachment.word_normed]
+            d[i] = vid
+            r[i] = rid
+            i += 1
+        deps.append(d)
+        rels.append(r)
+    return [np.array(deps), np.array(rels)]
+
+def read_relationships(filename, max_relationships):
+    labels = []
+    with open(filename) as f:
+        for i, line in enumerate(f):
+            if i >= max_relationships:
+                break
+            labels.append(line.strip().split("\t")[0])
+    return {l: i for i, l in enumerate(labels)}
+
+
+def compute_mymodel(space, targets, model, depmat, candidates):
+    #model.train_on_batch(depmat, targets)
+    predvecs = model.predict(depmat, batch_size=1024) #+ space.matrix[targets]
+    predvecs = normalize(predvecs, norm='l2', axis=1)
+    normspace = space.normalize()
+    candvecs = space.matrix[candidates]
+    targetvecs = normspace.matrix[targets] # (2003, 600)
+    predvecs += targetvecs
+    scores = np.einsum('ij,ikj->ik', predvecs, candvecs)
+
+    return scores
 
 
 def compute_oren(space, targets, depmat, candidates):
@@ -244,22 +290,6 @@ def compute_oren(space, targets, depmat, candidates):
     pred_scores = (left + right) / n[:,np.newaxis]
 
     return pred_scores
-
-def compute_fakeoren(space, targets, depmat, candidates):
-    normspace = space.normalize()
-    targetvecs = normspace.matrix[targets]
-    candvecs = normspace.matrix[candidates]
-    depvecs = normspace.cmatrix[depmat].sum(axis=1)
-
-    # dist = || (a - p) - ((a - p)^Tn)n ||
-    n = normalize(depvecs - targetvecs, axis=1, norm='l2') # (1972, 300)
-    a_p = targetvecs[:,np.newaxis,:] - candvecs # (1972, 38, 300)
-    a_pTn = np.einsum('ijk,ik->ij', a_p, n) # (1972, 38)
-    a_pTnn = np.multiply(a_pTn[:,:,np.newaxis], n[:,np.newaxis,:]) # (1972, 38, 300)
-
-    dists = np.sqrt(np.sum(np.square(a_p - a_pTnn), axis=2))
-    return -dists
-
 
 def compute_ooc(space, targets, candidates):
     normspace = space.normalize()
@@ -326,34 +356,8 @@ def gap_correct(gold_indices, gold_weights, ranked_candidate_indices):
 
     return gap
 
-
-
-def main():
-    parser = argparse.ArgumentParser('Performs lexical substitution')
-    args = parser.parse_args()
-
-    # load the data
-    #semeval = LexsubData("data/semeval_all")
-    semeval = LexsubData("data/coinco")
-    # load the space
-    #space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/output/dependency.svd300.ppmi.250k.1m.npz", True)
-    #space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/dependency/output/dependency.w2v500.top250k.top1m.npz", True)
-    space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/levy/lexsub_embeddings.npz", True)
-    # need to map our vocabulary to their indices
-    targets, candidates, scores = semeval.generate_matrices(space.lookup)
-    depmat = dependencies_to_indices(semeval.tokens, semeval.parses, space.clookup, space)
-    print depmat
-
-    #pred_scores = compute_fakeoren(space, targets, depmat, candidates)
-    #pred_scores = compute_oren(space, targets, depmat, candidates)
-    pred_scores = compute_ooc(space, targets, candidates)
-    #pred_scores = compute_random(candidates)
-    #pred_scores = compute_oracle(candidates, scores, space)
+def many_gaps(pred_scores, candidates, scores):
     assert scores.shape == pred_scores.shape
-
-    #pred_scores = pred_scores[2:3,:]
-    #scores = scores[2:3,:]
-
     gaps = []
     for i in xrange(pred_scores.shape[0]):
         cands = candidates[i]
@@ -367,13 +371,118 @@ def main():
         ranked_candidate_indices = ranked_candidate_indices[ranked_candidate_indices != 0]
         gaps.append(gap_correct(gold_indices, gold_weights, ranked_candidate_indices))
     gaps = np.array(gaps)
-
-    #mygap = gap(pred_scores, scores)
-    #print mygap
     gaps = gaps[~np.isnan(gaps)]
-    print gaps
-    print np.mean(gaps)
-    #print np.mean(mygap)
+    return gaps
+
+from common import *
+from nn import my_load_weights
+
+def main():
+    parser = argparse.ArgumentParser('Performs lexical substitution')
+    parser.add_argument('--model', '-m')
+    parser.add_argument('--supervise', action='store_true')
+    parser.add_argument('--data', '-d')
+    args = parser.parse_args()
+
+    if not args.data:
+        raise ValueError("You must specify a data folder")
+
+    # load the data
+    semeval = LexsubData(args.data)
+    space = utdeftvs.load_numpy("/work/01813/roller/maverick/nnexp/lexsub_embeddings.npz", True)
+    relations = read_relationships("/work/01813/roller/maverick/nnexp/relations.txt", 1000)
+    #model = ctxpredict.models.get_model("2d", space, len(relations), space.matrix.shape[1])
+    # load the space
+    #space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/output/dependency.svd300.ppmi.250k.1m.npz", True)
+    #space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/giga+bnc+uk+wiki2015/dependency/output/dependency.w2v500.top250k.top1m.npz", True)
+    #space = utdeftvs.load_numpy("/scratch/cluster/roller/spaces/levy/lexsub_embeddings.npz", True)
+    # need to map our vocabulary to their indices
+    targets, candidates, scores = semeval.generate_matrices(space.lookup)
+    #depmat = dependencies_to_indices(semeval.tokens, semeval.parses, space.clookup, space)
+    depmat = dependencies_to_indicies3(semeval.tokens, semeval.parses, space.lookup, relations)
+    # converting the data set to be supervised:
+    if args.supervise:
+        print "Generating supervised variation. Repeating observed targets %d times." % int(scores.max())
+        original_target = []
+        super_y = []
+        super_contexts = []
+        super_rels = []
+        for i in xrange(len(targets)):
+            for j in xrange(int(scores.max())):
+                break
+                super_y.append(targets[i])
+                super_contexts.append(depmat[0][i])
+                super_rels.append(depmat[1][i])
+                original_target.append(targets[i])
+            for c, s in zip(candidates[i], scores[i]):
+                if s <= 0: continue
+                for j in xrange(int(s)):
+                    super_y.append(c)
+                    super_contexts.append(depmat[0][i])
+                    super_rels.append(depmat[1][i])
+                    original_target.append(targets[i])
+        original_target = np.array(original_target)
+        super_contexts = np.array(super_contexts)
+        super_rels = np.array(super_rels)
+        super_y = np.array(super_y)
+
+        np.savez_compressed("%s/data.npz" % args.data, original_target, super_y, super_contexts, super_rels)
+
+        ot = set(original_target)
+        sample = set(np.random.choice(list(ot), len(ot)/10, False))
+        train = np.array([y not in sample for y in original_target])
+        train_bits = np.array([t not in sample for t in targets])
+        assert len(set(original_target[train]).intersection(set(targets[~train_bits]))) == 0
+        print "Result of supervised generation: %d items." % len(super_y)
+
+    espace = utdeftvs.VectorSpace(embedding_matrix, space.vocab)
+    #import ipdb; ipdb.set_trace()
+    #print depmat
+
+    MODEL_FOLDER = args.model
+    import keras.models
+    model = keras.models.model_from_json(open(MODEL_FOLDER + "/model.json").read())
+    for filename in sorted(os.listdir(MODEL_FOLDER))[-1:]:
+        if not filename.endswith('.npz'):
+            continue
+        my_load_weights(model, embedding_matrix, "%s/%s" % (MODEL_FOLDER, filename))
+        model.optimizer.lr = 0.01
+
+        if args.supervise:
+            baseline = model.evaluate([super_contexts[~train], super_rels[~train]], embedding_matrix[super_y[~train]])
+            pred_scores = compute_mymodel(espace, targets[~train_bits], model, 
+                    [depmat[0][~train_bits], depmat[1][~train_bits]], candidates[~train_bits])
+            gaps = many_gaps(pred_scores, candidates[~train_bits], scores[~train_bits])
+            print "Before training: %6.4f    %.4f" % (baseline, np.mean(gaps))
+            print model.optimizer.lr
+            for x in xrange(10):
+                model.fit([super_contexts[train], super_rels[train]], embedding_matrix[super_y[train]],
+                        validation_data=([super_contexts[~train], super_rels[~train]], embedding_matrix[super_y[~train]]),
+                        verbose=True, nb_epoch=1, batch_size=1024)
+                pred_scores = compute_mymodel(espace, targets[~train_bits], model, 
+                        [depmat[0][~train_bits], depmat[1][~train_bits]], candidates[~train_bits])
+                gaps = many_gaps(pred_scores, candidates[~train_bits], scores[~train_bits])
+                print "After_training\t%s\t%s\t%.4f" % (MODEL_FOLDER, filename, np.mean(gaps))
+        else:
+            pred_scores = compute_mymodel(espace, targets, model, depmat, candidates)
+            gaps = many_gaps(pred_scores, candidates, scores)
+            print "Unsupervised\t%s\t%s\tgap\t%.4f" % (MODEL_FOLDER, filename, np.mean(gaps))
+
+
+        #pred_scores = compute_mymodel(space, targets, model, depmat, candidates)
+
+        #pred_scores = compute_mymodel(espace, targets[~train_bits], model, depmat[~train_bits], candidates[~train_bits])
+        #pred_scores = compute_oren(space, targets, depmat, candidates)
+        #pred_scores = compute_ooc(space, targets, candidates)
+        #pred_scores = compute_random(candidates)
+        #pred_scores = compute_oracle(candidates, scores, space)
+
+        #pred_scores = pred_scores[2:3,:]
+        #scores = scores[2:3,:]
+
+
+        #print gaps
+        #print np.mean(mygap)
 
 
 
