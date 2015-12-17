@@ -42,8 +42,6 @@ import string
 from operator import itemgetter
 from xml.etree import ElementTree
 
-import ftfy
-
 
 def is_printable(s):
     return all(c in string.printable for c in s)
@@ -51,11 +49,9 @@ def is_printable(s):
 import unidecode
 
 def clean_token(token):
-    token = unidecode.unidecode(unicode(token)) #token.encode('utf-8'))
+    token = unidecode.unidecode(unicode(token))
     return token
-    #return ftfy.fix_encoding(token)
 
-    
     token = token.replace('&quot;', '"')
     token = token.replace('&apos;', "'")
     token = token.replace(chr(int("85",16)), "...")
@@ -65,10 +61,9 @@ def clean_token(token):
     token = token.replace(chr(int("94",16)), '"')
     token = token.replace(chr(int("96",16)), '-') 
     token = token.replace(chr(0xe2) + chr(0x80) + chr(0x99), "'")
-        
+
     if not is_printable(token):
         sys.stderr.write(''.join([str(c) for c in token if c in string.printable ]) + '\n')
-        import ipdb; ipdb.set_trace()
         return token
     else:
         return token
@@ -81,7 +76,6 @@ def subs2text(subs_element):
     return retval
 
 if __name__ == '__main__':
-    
     if len(sys.argv)<3:
         print("Usage: %s <coinco-filename> <output-vocab-filename> <output-test-filename> <output-gold-filename>" % sys.argv[0])
         sys.exit(1)
@@ -104,7 +98,7 @@ if __name__ == '__main__':
         tokens = sent.find('tokens')
         sent_text = ""
         for token in tokens.iter('token'):
-            sent_text = sent_text + clean_token(token.attrib.get('wordform')).lower() + " "                
+            sent_text = sent_text + clean_token(token.attrib.get('wordform')).lower() + " "
             if token.attrib.get('id') != 'XXX':
                 wordform = token.attrib.get('wordform').lower()
                 if not '-' in wordform:
