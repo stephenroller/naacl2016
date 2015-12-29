@@ -83,8 +83,6 @@ def scrub_candidates(before, target):
     fakesubs = {k: 1 for k in before}
     return scrub_substitutes(fakesubs, target).keys()
 
-
-
 class LexsubData(object):
     def __init__(self, foldername):
         # load gold file
@@ -246,7 +244,7 @@ def dependencies_to_indices(target_tokens, parses, lookup,space):
         l = len(d)
         depmat[i,:l] = d
 
-    return depmat
+    return depmat[:,::-1]
 
 def dependencies_to_indicies3(target_tokens, parses, vlookup, rlookup):
     deps = []
@@ -296,12 +294,12 @@ def compute_mymodel(space, targets, model, depmat, candidates, batch_size=1024):
 
 def compute_mymodel_allwords(space, targets, model, depmat):
     candidates = np.repeat([np.arange(len(space.vocab))], len(targets), axis=0)
-    predvecs = model.predict([depmat, candidates], batch_size=16)
-    predvecs = normalize(predvecs, norm='l1')
+    predvecs = model.predict([depmat, candidates], batch_size=8)
+    predvecs = np.log(normalize(predvecs, norm='l1'))
     targetvecs = space.matrix[targets]
     ooc = np.exp(np.dot(targetvecs, space.matrix.T))
-    ooc = normalize(ooc, norm='l1', axis=1)
-    scores = np.multiply(predvecs, ooc)
+    ooc = np.log(normalize(ooc, norm='l1', axis=1))
+    scores = predvecs + ooc
     scores[:,0] = 0 # null out the blank words
     # null out the original target
     for i in xrange(len(targets)):
@@ -434,18 +432,21 @@ def nanmean(arr):
 
 def many_prec1(pred_scores, scores):
     assert scores.shape == pred_scores.shape
+    pred_scores[pred_scores == 0] = -1e9
     bestpick = pred_scores.argmax(axis=1)
     score_at_best = scores[np.arange(len(scores)),bestpick]
-    return np.array(score_at_best > 0, dtype=np.float)
+    gold_values = (scores.max(axis=1) > 0)
+    retval = np.array(score_at_best > 0, dtype=np.float) / gold_values
+    return retval
 
-def prec_at_k(pred_scores, scores, ks=[1, 3, 5, 10]):
-    ranked = (-pred_scores).argsort(axis=1)
-    precisions = []
-    pass
+def prec_at_k(pred_scores, scores, k=10):
+    top_preds = np.argpartition(pred_scores, -k, 1)[:,-k:]
+    num_possible = (scores > 0).sum(axis=1, dtype=np.float)
 
-def many_prec3(pred_scores, candidates, scores):
-    assert scores.shape == pred_scores.shape
-
+    top_pred_true = np.array([s[tp] for s, tp in izip(scores, top_preds)])
+    num_right = (top_pred_true > 0).sum(axis=1, dtype=np.float)
+    #num_right[num_possible == 0] = np.nan
+    return num_right / k
 
 from common import *
 from nn import my_load_weights
@@ -505,17 +506,19 @@ def main():
         else:
             pred_scores = np.zeros(candidates.shape)
         gaps = many_gaps(pred_scores, candidates, scores)
+        prec3s = prec_at_k(pred_scores, scores, 3)
         prec1s = many_prec1(pred_scores, scores)
         if args.allvocab:
             prec1s_av = many_prec1(allvocab_pred_scores, allvocab_scores)
         else:
             prec1s_av = np.zeros(len(targets))
-        print "baseline %s\tgap %.4f\tp@1 %.4f\tp@1av %.4f" % (args.baseline, nanmean(gaps), nanmean(prec1s), nanmean(prec1s_av))
+        print "baseline %s\tgap %.4f\tp@1 %.4f\tp@1av %.4f" % (args.baseline, nanmean(gaps), nanmean(prec1s), nanmean(prec3s))
     elif args.model:
         MODEL_FOLDER = args.model
         import keras.models
         model = my_model_from_json(MODEL_FOLDER + "/model.json")
-        for filename in sorted(os.listdir(MODEL_FOLDER))[-1:]:
+        for filename in sorted(os.listdir(MODEL_FOLDER)): #[-1:]:
+            print "Computing with %s" % filename
             if not filename.endswith('.npz'):
                 continue
             my_load_weights(model, "%s/%s" % (MODEL_FOLDER, filename))
