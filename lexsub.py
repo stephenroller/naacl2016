@@ -88,6 +88,7 @@ class LexsubData(object):
         # load gold file
         golds = {}
         targets = {}
+        original_targets = {}
         candidates = {}
         sentences = defaultdict(list)
         starts = defaultdict(list)
@@ -103,8 +104,9 @@ class LexsubData(object):
                 left = left.strip()
                 right = right.strip()
                 target, ident = splitpop(left, " ")
-                target = rewrite_pos(target)
                 ident = int(ident)
+                original_targets[ident] = target
+                target = rewrite_pos(target)
                 rights = [r.strip() for r in right.split(";") if r.strip()]
                 # gold_golds is what the data explicitly says are the gold substitutes
                 # but these are not lemmatized or POS tagged, and contain MWE. We
@@ -162,6 +164,7 @@ class LexsubData(object):
         idents = targets.keys()
         self.idents = idents
         self.tokens = [tokens[k] for k in idents]
+        self.original_targets = [original_targets[k] for k in idents]
         self.targets = [targets[k] for k in idents]
         self.parses = [parses[k] for k in idents]
 
@@ -171,7 +174,7 @@ class LexsubData(object):
                 self.golds[ident][c] = subs.get(c, 0)
         self.golds = [self.golds[k] for k in idents]
 
-        assert len(self.targets) == len(self.parses) == len(self.golds) == len(self.idents)
+        assert len(self.targets) == len(self.parses) == len(self.golds) == len(self.idents) == len(self.original_targets)
 
 
     def generate_matrices(self, vocablookup):
@@ -280,6 +283,18 @@ def read_relationships(filename, max_relationships):
 def magnitude(x):
     return np.sqrt(np.sum(np.square(x), axis=-1))
 
+def fix_pred_scores(pred_scores, candidates):
+    r = pred_scores.copy()
+    r[candidates == 0] = -1e9
+    return r
+
+def fix_allvocab_pred_scores(pred_scores, targets):
+    r = pred_scores.copy()
+    r[:,0] = -1e9
+    for i, t in enumerate(targets):
+        r[i,t] = -1e9
+    return r
+
 def compute_mymodel(space, targets, model, depmat, candidates, batch_size=1024):
     predvecs = model.predict([depmat, candidates], batch_size=batch_size)
     predvecs[candidates == 0] = 0
@@ -287,7 +302,6 @@ def compute_mymodel(space, targets, model, depmat, candidates, batch_size=1024):
     targetvecs = space.matrix[targets] # (2003, 600)
     candvecs = space.matrix[candidates]
     ooc = np.exp(np.einsum('ij,ikj->ik', targetvecs, candvecs))
-    ooc[candidates == 0] = 0
     ooc = normalize(ooc, norm='l1', axis=1)
     scores = np.log(predvecs) + np.log(ooc)
     return scores
@@ -300,10 +314,6 @@ def compute_mymodel_allwords(space, targets, model, depmat):
     ooc = np.exp(np.dot(targetvecs, space.matrix.T))
     ooc = np.log(normalize(ooc, norm='l1', axis=1))
     scores = predvecs + ooc
-    scores[:,0] = 0 # null out the blank words
-    # null out the original target
-    for i in xrange(len(targets)):
-        scores[i,targets[i]] = 0
     return scores
 
 def compute_oren(space, targets, depmat, candidates):
@@ -327,15 +337,10 @@ def compute_oren_allvocab(space, targets, depmat):
     left = targetvecs.dot(normspace.matrix.T)
     right = depvecs.sum(axis=1).dot(normspace.matrix.T)
     pred_scores = (left + right)
-    pred_scores[:,0] = 0 # null out the blank words
-    # null out the original target
-    for i in xrange(len(targets)):
-        pred_scores[i,targets[i]] = 0
     return pred_scores
 
 def compute_ooc(space, targets, candidates):
     normspace = space.normalize()
-    #normspace = space
     targetvecs = normspace.matrix[targets]
     candvecs = normspace.matrix[candidates]
     pred_scores = np.einsum('ij,ikj->ik', targetvecs, candvecs)
@@ -432,20 +437,19 @@ def nanmean(arr):
 
 def many_prec1(pred_scores, scores):
     assert scores.shape == pred_scores.shape
-    pred_scores[pred_scores == 0] = -1e9
     bestpick = pred_scores.argmax(axis=1)
     score_at_best = scores[np.arange(len(scores)),bestpick]
     gold_values = (scores.max(axis=1) > 0)
     retval = np.array(score_at_best > 0, dtype=np.float) / gold_values
     return retval
 
-def prec_at_k(pred_scores, scores, k=10):
+def prec_at_k(pred_scores, scores, k=10, mask=None):
     top_preds = np.argpartition(pred_scores, -k, 1)[:,-k:]
-    num_possible = (scores > 0).sum(axis=1, dtype=np.float)
+    num_possible = (scores > 0).sum(axis=1, dtype=np.float).clip(0, k)
 
     top_pred_true = np.array([s[tp] for s, tp in izip(scores, top_preds)])
     num_right = (top_pred_true > 0).sum(axis=1, dtype=np.float)
-    #num_right[num_possible == 0] = np.nan
+    num_right[num_possible == 0] = np.nan
     return num_right / k
 
 from common import *
@@ -458,10 +462,13 @@ def main():
     parser.add_argument('--allvocab', action='store_true')
     parser.add_argument('--baseline', choices=('oren', 'random', 'ooc', 'oracle', 'orensm', 'orenun'))
     parser.add_argument('--save')
+    parser.add_argument('--semeval')
     args = parser.parse_args()
 
     if (args.model and args.baseline) or (not args.model and not args.baseline):
         raise ValueError("Please supply exactly one of model or baseline.")
+    if args.semeval and not args.allvocab:
+        raise ValueError("Need to evaluate on allvocab to output semeval predictions.")
 
     if not args.data:
         raise ValueError("You must specify a data folder")
@@ -489,6 +496,7 @@ def main():
                 s = scores[i,j]
                 if s > 0:
                     allvocab_scores[i,c] = s
+    allvocab_pred_scores = np.zeros(len(space.vocab))
     if args.baseline:
         print "Computing baseline %s" % args.baseline
         if args.baseline == 'oren':
@@ -505,41 +513,46 @@ def main():
             pred_scores = compute_oracle(candidates, scores, space)
         else:
             pred_scores = np.zeros(candidates.shape)
-        gaps = many_gaps(pred_scores, candidates, scores)
-        prec3s = prec_at_k(pred_scores, scores, 3)
-        prec1s = many_prec1(pred_scores, scores)
-        if args.allvocab:
-            prec1s_av = many_prec1(allvocab_pred_scores, allvocab_scores)
-        else:
-            prec1s_av = np.zeros(len(targets))
-        print "baseline %s\tgap %.4f\tp@1 %.4f\tp@1av %.4f" % (args.baseline, nanmean(gaps), nanmean(prec1s), nanmean(prec3s))
+        modelname = "baseline"
+        modelinfo = args.baseline
     elif args.model:
-        MODEL_FOLDER = args.model
-        import keras.models
-        model = my_model_from_json(MODEL_FOLDER + "/model.json")
-        for filename in sorted(os.listdir(MODEL_FOLDER)): #[-1:]:
-            print "Computing with %s" % filename
-            if not filename.endswith('.npz'):
-                continue
-            my_load_weights(model, "%s/%s" % (MODEL_FOLDER, filename))
-            #model.optimizer.lr = 0.01
+        model = my_model_from_json(args.model + "/model.json")
+        filename = sorted(os.listdir(args.model))[-1]
+        my_load_weights(model, "%s/%s" % (args.model, filename))
 
-            pred_scores = compute_mymodel(space, targets, model, depmat, candidates)
+        pred_scores = compute_mymodel(space, targets, model, depmat, candidates)
+        pred_scores = fix_pred_scores(pred_scores, candidates)
+        if args.allvocab:
+            allvocab_pred_scores = compute_mymodel_allwords(space, targets, model, depmat)
+        modelname = args.model
+        modelinfo = filename
+    else:
+        raise ValueError("Not given model or baseline to compute...")
 
-            if args.allvocab:
-                allvocab_pred_scores = compute_mymodel_allwords(space, targets, model, depmat)
-                prec1s_av = many_prec1(allvocab_pred_scores, allvocab_scores)
-            else:
-                prec1s_av = np.zeros(len(targets))
-            prec1s = many_prec1(pred_scores, scores)
-            gaps = many_gaps(pred_scores, candidates, scores)
-            print "Unsupervised\t%s\t%s\t%s\tgap\t%.4f\tp@1\t%.4f\tp@1av\t%.4f" % (
-                    args.data, MODEL_FOLDER, filename, nanmean(gaps), nanmean(prec1s), nanmean(prec1s_av)
-                    )
+    # make sure we're not guessing the target, or the empty vector
+    pred_scores = fix_pred_scores(pred_scores, candidates)
+    if args.allvocab:
+        allvocab_pred_scores = fix_allvocab_pred_scores(allvocab_pred_scores, targets)
+
+    # compute evaluations
+    gaps = many_gaps(pred_scores, candidates, scores)
+    prec1s = many_prec1(pred_scores, scores)
+    prec3s = prec_at_k(pred_scores, scores, 3)
+    # allvocab is slow; only compute that if we have to
+    if args.allvocab:
+        prec1s_av = many_prec1(allvocab_pred_scores, allvocab_scores)
+        prec3s_av = prec_at_k(allvocab_pred_scores, allvocab_scores, 3)
+    else:
+        prec1s_av = np.zeros(len(targets))
+        prec3s_av = np.zeros(len(targets))
+
+    print ("%s\t%s\t%s\tgap %.3f\tp@1 %.3f\tp@3 %.3f\tp@1av %.3f\tp@3av %.3f" %
+            (args.data, modelname, modelinfo,
+             nanmean(gaps), nanmean(prec1s), nanmean(prec3s), nanmean(prec1s_av), nanmean(prec3s_av)))
 
     if args.save:
         with open(args.save, 'w') as f:
-            f.write('\t'.join(['ident', 'target', 'sentence', 'gold', 'predicted', 'gap', 'p@1', 'p@1av']))
+            f.write('\t'.join(['ident', 'target', 'sentence', 'gold', 'predicted', 'gap', 'p@1', 'p@3', 'p@1av', 'p@3av']))
             f.write('\n')
             for i in xrange(len(semeval.idents)):
                 ident = semeval.idents[i]
@@ -550,16 +563,31 @@ def main():
                 candidates_i = candidates[i]
                 gap = gaps[i]
                 prec1 = prec1s[i]
+                prec3 = prec3s[i]
                 prec1av = prec1s_av[i]
+                prec3av = prec3s_av[i]
 
                 sentence = " ".join(t.word_normed for t in parse.tokens)
 
                 score_string = " ".join("%s:%3.1f" % (space.vocab[c], s) for c, s in zip(candidates_i, scores_i) if c != 0)
                 pred_string = " ".join("%s:%f" % (space.vocab[c], p) for c, p in revsorted(zip(candidates_i, pred_scores_i)) if c != 0)
-                outline = '\t'.join([str(ident), target, sentence, score_string, pred_string, str(gap), str(prec1), str(prec1av)])
+                outline = '\t'.join([str(ident), target, sentence, score_string, pred_string, str(gap), str(prec1), str(prec3), str(prec1av), str(prec3av)])
                 outline = unidecode(outline)
                 f.write(outline)
                 f.write('\n')
+    if args.semeval:
+        bestf = open(args.semeval + ".best", "w")
+        bootf = open(args.semeval + ".boot", "w")
+        bests = allvocab_pred_scores.argmax(axis=1)
+        boots = np.argpartition(allvocab_pred_scores, -10, 1)[:,-10:]
+        for i in xrange(len(semeval.idents)):
+            ident = semeval.idents[i]
+            ot = semeval.original_targets[i]
+            bestf.write("%s %d :: %s\n" % (ot, ident, space.vocab[bests[i]]))
+            bootf.write("%s %d ::: %s\n" % (ot, ident, ";".join(space.vocab[boots[i]])))
+        bestf.close()
+        bootf.close()
+
 
 
 if __name__ == '__main__':
