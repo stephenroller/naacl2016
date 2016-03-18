@@ -295,9 +295,37 @@ def fix_allvocab_pred_scores(pred_scores, targets):
         r[i,t] = -1e9
     return r
 
+def fix_lemma_problem(pred_scores, targets, space):
+    from nltk.stem.snowball import EnglishStemmer
+    es = EnglishStemmer()
+    r = pred_scores.copy()
+    lemmas = np.array([es.stem(v) for v in space.vocab])
+    for i, t in enumerate(targets):
+        g = es.stem(space.vocab[t])
+        mask = (lemmas == g)
+        #print space.vocab[t], np.sum(mask)
+        r[i][mask] = -1e9
+        #print r[i][mask]
+    return r
+
+
+def compute_softmax_oren(space, targets, depmat, candidates):
+    targetvecs = space.matrix[targets] # (2003, 600)
+    depvecs = space.cmatrix[depmat] # (2003, 14, 600)
+    candvecs = space.matrix[candidates] # (2003, 38, 600)
+    left = np.einsum('ij,ikj->ik', targetvecs, candvecs)
+    right = np.einsum('ik,ilk->il', depvecs.sum(axis=1), candvecs)
+    return np.log(normalize(np.exp(left), norm='l1')) + np.log(normalize(np.exp(right), norm='l1'))
+
+def compute_softmax_oren_allvocab(space, targets, depmat):
+    targetvecs = space.matrix[targets]
+    depvecs = space.cmatrix[depmat]
+    left = targetvecs.dot(space.matrix.T)
+    right = depvecs.sum(axis=1).dot(space.matrix.T)
+    return np.log(normalize(np.exp(left), norm='l1')) + np.log(normalize(np.exp(right), norm='l1'))
+
 def compute_mymodel(space, targets, model, depmat, candidates, batch_size=1024):
     predvecs = model.predict([depmat, candidates], batch_size=batch_size)
-    predvecs[candidates == 0] = 0
     predvecs = normalize(predvecs, norm='l1')
     targetvecs = space.matrix[targets] # (2003, 600)
     candvecs = space.matrix[candidates]
@@ -316,7 +344,7 @@ def compute_mymodel_allwords(space, targets, model, depmat):
     scores = predvecs + ooc
     return scores
 
-def compute_oren(space, targets, depmat, candidates):
+def compute_oren(space, targets, depmat, candidates, balanced=False):
     normspace = space.normalize()
 
     targetvecs = normspace.matrix[targets] # (2003, 600)
@@ -324,17 +352,21 @@ def compute_oren(space, targets, depmat, candidates):
     candvecs = normspace.matrix[candidates] # (2003, 38, 600)
 
     left = np.einsum('ij,ikj->ik', targetvecs, candvecs)
+    if balanced:
+        left = left * (depmat > 0).sum(axis=1)[:,np.newaxis]
     right = np.einsum('ijk,ilk->il', depvecs, candvecs)
     pred_scores = (left + right)
 
     return pred_scores
 
-def compute_oren_allvocab(space, targets, depmat):
+def compute_oren_allvocab(space, targets, depmat, balanced=False):
     normspace = space.normalize()
 
     targetvecs = normspace.matrix[targets]
     depvecs = normspace.cmatrix[depmat]
     left = targetvecs.dot(normspace.matrix.T)
+    if balanced:
+        left = left * (depmat > 0).sum(axis=1)[:,np.newaxis]
     right = depvecs.sum(axis=1).dot(normspace.matrix.T)
     pred_scores = (left + right)
     return pred_scores
@@ -460,7 +492,7 @@ def main():
     parser.add_argument('--model', '-m')
     parser.add_argument('--data', '-d')
     parser.add_argument('--allvocab', action='store_true')
-    parser.add_argument('--baseline', choices=('oren', 'random', 'ooc', 'oracle', 'orensm', 'orenun'))
+    parser.add_argument('--baseline', choices=('oren', 'random', 'ooc', 'oracle', 'orensm', 'baloren'))
     parser.add_argument('--save')
     parser.add_argument('--semeval')
     args = parser.parse_args()
@@ -503,6 +535,14 @@ def main():
             pred_scores = compute_oren(space, targets, depmat, candidates)
             if args.allvocab:
                 allvocab_pred_scores = compute_oren_allvocab(space, targets, depmat)
+        elif args.baseline == 'baloren':
+            pred_scores = compute_oren(space, targets, depmat, candidates, balanced=True)
+            if args.allvocab:
+                allvocab_pred_scores = compute_oren_allvocab(space, targets, depmat, balanced=True)
+        elif args.baseline == 'orensm':
+            pred_scores = compute_softmax_oren(space, targets, depmat, candidates)
+            if args.allvocab:
+                allvocab_pred_scores = compute_softmax_oren_allvocab(space, targets, depmat)
         elif args.baseline == 'ooc':
             pred_scores = compute_ooc(space, targets, candidates)
             if args.allvocab:
@@ -533,6 +573,7 @@ def main():
     pred_scores = fix_pred_scores(pred_scores, candidates)
     if args.allvocab:
         allvocab_pred_scores = fix_allvocab_pred_scores(allvocab_pred_scores, targets)
+        allvocab_pred_scores = fix_lemma_problem(allvocab_pred_scores, targets, space)
 
     # compute evaluations
     gaps = many_gaps(pred_scores, candidates, scores)
